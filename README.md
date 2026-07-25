@@ -92,6 +92,8 @@ C:\Program Files\PTI\PSSE34\PSSPY27
 | `BUS_NAME_FIELD_WIDTH` | `12` | Fixed-width bus name field used by PSS/E v34's SC report. |
 | `MAX_PLAUSIBLE_KV` | `800.0` | Sanity ceiling for a parsed kV value; raise for higher-voltage models. |
 
+All IEC 60909 fault settings (fault types, report format, tap/charging/shunt/load treatment, generator reactance model, voltage factor) are individually configurable near the top of the script, with defaults matching a standard IEC summary study. See the `psspy.iecs_4` API documentation for the meaning of each option.
+
 ---
 
 ## Output
@@ -142,4 +144,4 @@ LinkedIn: [linkedin.com/in/4haiderali](https://linkedin.com/in/4haiderali)
 
 ## Version
 
-Current release: `1.0.0`
+Current release: `1.0.1`

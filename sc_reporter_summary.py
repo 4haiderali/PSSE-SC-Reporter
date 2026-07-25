@@ -2,7 +2,7 @@
 # PSS/E Short Circuit Reporter (Summary Only)
 # Batch IEC 60909 fault analysis to a formatted Excel summary
 #
-# Version : 1.0.0
+# Version : 1.0.1
 # Author  : Haider Ali (github.com/4haiderali)
 # License : MIT
 #
@@ -10,9 +10,8 @@
 #   1. Place this script in a folder containing (or above) your
 #      PSS/E .sav case file(s). It will recursively search for
 #      .sav files in the current folder and subfolders.
-#   2. Edit the USER SETTINGS section below:
-#        SC_BUSES  - bus number(s) to fault
-#        PSSE_PATH - path to your PSS/E 34 Python 2.7 installation
+#   2. Edit the USER SETTINGS section below - at minimum SC_BUSES
+#      and PSSE_PATH.
 #   3. Run from the PSS/E Python 2.7 environment:
 #        exec(open("sc_reporter_summary.py").read())
 #      or launch via the PSS/E script runner.
@@ -29,6 +28,10 @@
 #          circuit analysis on user-defined buses, formatted Excel summary
 #          output (bus, name, kV, 3-phase/1-phase kA), a metadata footer,
 #          and safe-save logic for a locked output file.
+#   1.0.1  All IEC 60909 fault settings (psspy.iecs_4 STATUS/VALUES) are
+#          now named, individually documented USER SETTINGS instead of a
+#          single hardcoded array. USER SETTINGS moved to the top of the
+#          file, ahead of PSS/E path setup.
 # ============================================================
 
 from __future__ import print_function, division  # MUST be the first import
@@ -51,20 +54,115 @@ except ImportError:
     print("  <PSSE_PATH>\\python.exe -m pip install openpyxl")
     sys.exit()
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 TOOL_NAME = "PSS/E Short Circuit Reporter (Summary Only)"
 TOOL_AUTHOR = "Haider Ali"
 TOOL_GITHUB = "github.com/4haiderali"
 
 # ============================================================
-# PSS/E v34 / Python 2.7 setup
+# USER SETTINGS
 # ============================================================
 
-# Adjust this to match your PSS/E 34 installation.
+# REQUIRED: set the bus number(s) to fault before running.
+# The script will stop with a clear error if this is left empty.
+# Example: SC_BUSES = [101, 205, 30012]
+SC_BUSES = []
+
+# PSS/E 34 Python installation. Adjust to match your install.
 # Common alternatives:
 #   r"C:\Program Files\PTI\PSSE34\PSSPY27"       (64-bit installer)
 #   r"C:\Program Files (x86)\PTI\PSSE34\PSSPY27" (32-bit / default)
 PSSE_PATH = r"C:\Program Files (x86)\PTI\PSSE34\PSSPY27"
+
+# Folder search depth (0 = current folder, 1 = one level down, etc.)
+SEARCH_LEVELS = [0, 1, 2, 3]
+
+# Output folder name (created alongside this script).
+OUTPUT_FOLDER_NAME = "Short Circuit Reports"
+
+# Fixed-width bus name field in the PSS/E SC report (v34 caps names at 12).
+BUS_NAME_FIELD_WIDTH = 12
+
+# Sanity ceiling for parsed kV; raise if your model uses higher voltages.
+MAX_PLAUSIBLE_KV = 800.0
+
+# --- IEC 60909 fault settings (psspy.iecs_4 STATUS/VALUES arrays) ---
+# See PSS/E API docs, IECS_4, for the full meaning of each option.
+
+# Fault types to include
+INCLUDE_3PHASE_FAULT = True     # STATUS(1)
+INCLUDE_LG_FAULT = True         # STATUS(2) line-to-ground
+INCLUDE_LLG_FAULT = False       # STATUS(3) line-line-to-ground
+INCLUDE_LL_FAULT = False        # STATUS(4) line-to-line
+
+# Report format
+REPORT_OPTION = 0               # STATUS(5): 0=summary table, 1=total currents,
+                                 #   2=contributions to N levels, 3=both
+CONTRIBUTION_LEVELS = 0         # STATUS(6): used only if REPORT_OPTION is 2 or 3
+
+# Fault location
+FAULT_LOCATION = 0              # STATUS(7): 0=network bus, 1=PSU LV bus,
+                                 #   2=auxiliary transformer LV bus
+
+# Additional fault scenarios
+INCLUDE_LINE_OUT_FAULTS = False # STATUS(8)
+INCLUDE_LINE_END_FAULTS = False # STATUS(9)
+
+# Network modeling options
+TAP_OPTION = 0                  # STATUS(10): 0=unchanged, 1=taps 1.0pu & shift 0deg,
+                                 #   2=taps 1.0pu only, 3=shift 0deg only
+LINE_CHARGING_OPTION = 1        # STATUS(11): 0=unchanged, 1=zero in pos/neg seq,
+                                 #   2=zero in all sequences
+SHUNT_OPTION = 1                # STATUS(12): same scale as LINE_CHARGING_OPTION
+DC_LINE_OPTION = 0              # STATUS(13): 0=blocked, 1=represent as load
+ZERO_SEQ_CORRECTION = 0         # STATUS(14): 0=ignore, 1=apply xfmr zero-seq correction
+VOLTAGE_FACTOR_OPTION = 0       # STATUS(15): 0=max fault C, 1=min fault C,
+                                 #   2=user C for max, 3=user C for min
+LOAD_OPTION = 1                 # STATUS(16): 0=unchanged, 1=zero in pos/neg seq,
+                                 #   2=zero in all sequences
+GENERATOR_REACTANCE_OPTION = 0  # STATUS(17): 0=subtransient, 1=transient, 2=synchronous
+
+# Fault calculation values
+BREAKER_CONTACT_TIME = 0.1      # VALUES(1), seconds
+USER_VOLTAGE_FACTOR_C = 1.0     # VALUES(2), used only if VOLTAGE_FACTOR_OPTION is 2 or 3
+
+# --- Excel styling ---
+BORDER_COLOR = "2F75B5"               # Strong Blue
+HEADER_INSIDE_BORDER_COLOR = "EDF5FC" # Very Light Blue
+HEADER_FILL_COLOR = "4A85B8"          # Standard Blue
+LIGHT_FILL_COLOR = "DDEBF7"           # Light Blue
+TEXT_COLOR = "FFFFFF"                 # White
+
+if not SC_BUSES:
+    raise RuntimeError(
+        "SC_BUSES is empty. Please define SC_BUSES = [bus numbers to fault] "
+        "in the USER SETTINGS section before running."
+    )
+
+FAULT_STATUS = [
+    1 if INCLUDE_3PHASE_FAULT else 0,
+    1 if INCLUDE_LG_FAULT else 0,
+    1 if INCLUDE_LLG_FAULT else 0,
+    1 if INCLUDE_LL_FAULT else 0,
+    REPORT_OPTION,
+    CONTRIBUTION_LEVELS,
+    FAULT_LOCATION,
+    1 if INCLUDE_LINE_OUT_FAULTS else 0,
+    1 if INCLUDE_LINE_END_FAULTS else 0,
+    TAP_OPTION,
+    LINE_CHARGING_OPTION,
+    SHUNT_OPTION,
+    DC_LINE_OPTION,
+    ZERO_SEQ_CORRECTION,
+    VOLTAGE_FACTOR_OPTION,
+    LOAD_OPTION,
+    GENERATOR_REACTANCE_OPTION,
+]
+FAULT_VALUES = [BREAKER_CONTACT_TIME, USER_VOLTAGE_FACTOR_C]
+
+# ============================================================
+# PSS/E v34 / Python 2.7 setup
+# ============================================================
 
 # Try common PSS/E 34 locations if the configured path is not found.
 if not os.path.isdir(PSSE_PATH):
@@ -82,7 +180,7 @@ if not os.path.isdir(PSSE_PATH):
     else:
         raise RuntimeError(
             "PSS/E Python path not found: {}\n"
-            "Edit PSSE_PATH in the USER SETTINGS/header section to match "
+            "Edit PSSE_PATH in the USER SETTINGS section to match "
             "your PSS/E 34 installation.".format(PSSE_PATH)
         )
 
@@ -100,39 +198,6 @@ import redirect
 
 redirect.psse2py()
 psspy.psseinit(50000)
-
-# ============================================================
-# USER SETTINGS
-# ============================================================
-
-# REQUIRED: set the bus number(s) to fault before running.
-# The script will stop with a clear error if this is left empty.
-# Example: SC_BUSES = [101, 205, 30012]
-SC_BUSES = []
-
-# Folder search depth (0 = current folder, 1 = one level down, etc.)
-SEARCH_LEVELS = [0, 1, 2, 3]
-
-# Output folder name (created alongside this script).
-OUTPUT_FOLDER_NAME = "Short Circuit Reports"
-
-# Fixed-width bus name field in the PSS/E SC report (v34 caps names at 12).
-BUS_NAME_FIELD_WIDTH = 12
-
-# Sanity ceiling for parsed kV; raise if your model uses higher voltages.
-MAX_PLAUSIBLE_KV = 800.0
-
-BORDER_COLOR = "2F75B5"               # Strong Blue
-HEADER_INSIDE_BORDER_COLOR = "EDF5FC" # Very Light Blue
-HEADER_FILL_COLOR = "4A85B8"          # Standard Blue
-LIGHT_FILL_COLOR = "DDEBF7"           # Light Blue
-TEXT_COLOR = "FFFFFF"                 # White
-
-if not SC_BUSES:
-    raise RuntimeError(
-        "SC_BUSES is empty. Please define SC_BUSES = [bus numbers to fault] "
-        "in the USER SETTINGS section before running."
-    )
 
 # ============================================================
 # System initialization
@@ -203,10 +268,7 @@ def run_iec_sc_analysis(sav_path, report_path, log_path):
 
         psspy.bsys(0, 0, [0.0, 0.0], 0, [], len(valid_buses), valid_buses, 0, [], 0, [])
 
-        psspy.iecs_4(0, 0,
-                     [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0],
-                     [0.1, 1.0],
-                     "", "", "")
+        psspy.iecs_4(0, 0, FAULT_STATUS, FAULT_VALUES, "", "", "")
     except Exception as e:
         print("Error during simulation: {}".format(str(e)))
         return False
