@@ -2,7 +2,7 @@
 # PSS/E Short Circuit Reporter (Summary Only)
 # Batch IEC 60909 fault analysis to a formatted Excel summary
 #
-# Version : 1.0.1
+# Version : 1.0.3
 # Author  : Haider Ali (github.com/4haiderali)
 # License : MIT
 #
@@ -32,6 +32,23 @@
 #          now named, individually documented USER SETTINGS instead of a
 #          single hardcoded array. USER SETTINGS moved to the top of the
 #          file, ahead of PSS/E path setup.
+#   1.0.2  Fixed a silent-empty-output bug: the parser and Excel columns
+#          were hardcoded for 3-phase + LG faults (5 numbers per report
+#          line). Since 1.0.1 made fault types configurable, any other
+#          combination (e.g. 3-phase only) produced a report with a
+#          different number of columns that silently matched nothing,
+#          writing an empty workbook with no error. The parser and output
+#          columns are now built dynamically from the enabled fault types.
+#          Also added a guard: only REPORT_OPTION = 0 (summary table) is
+#          supported by this parser.
+#   1.0.3  Parsing and output columns are now derived from the report's own
+#          header (detect_report_fault_types), not from the requested
+#          settings. PSS/E can silently compute fewer fault types than
+#          requested when a case is missing negative/zero-sequence data
+#          (same reason LG/LLG/LL gray out in the IEC dialog) - previously
+#          this produced another silent empty output. A mismatch between
+#          requested and actual fault types is now flagged both in the
+#          console and as a highlighted warning row in the Excel footer.
 # ============================================================
 
 from __future__ import print_function, division  # MUST be the first import
@@ -54,7 +71,7 @@ except ImportError:
     print("  <PSSE_PATH>\\python.exe -m pip install openpyxl")
     sys.exit()
 
-__version__ = "1.0.1"
+__version__ = "1.0.3"
 TOOL_NAME = "PSS/E Short Circuit Reporter (Summary Only)"
 TOOL_AUTHOR = "Haider Ali"
 TOOL_GITHUB = "github.com/4haiderali"
@@ -160,6 +177,33 @@ FAULT_STATUS = [
 ]
 FAULT_VALUES = [BREAKER_CONTACT_TIME, USER_VOLTAGE_FACTOR_C]
 
+# Columns in the SC report follow this fixed order (matches STATUS(1)-(4)):
+# 3-phase, then LG, then LLG, then LL - only enabled types get a column pair.
+# This drives what's requested from PSS/E. It is NOT necessarily what ends up
+# in the report: PSS/E can silently compute fewer fault types than requested
+# if a case is missing negative/zero-sequence data (the same reason the IEC
+# 60909 dialog grays out LG/LLG/LL faults). See detect_report_fault_types().
+_ALL_FAULT_TYPES = [
+    ("3PH", "3-Phase", INCLUDE_3PHASE_FAULT),
+    ("LG", "1-Phase (LG)", INCLUDE_LG_FAULT),
+    ("LLG", "LLG", INCLUDE_LLG_FAULT),
+    ("LL", "LL", INCLUDE_LL_FAULT),
+]
+REQUESTED_FAULT_TYPES = [(k, lbl) for k, lbl, on in _ALL_FAULT_TYPES if on]
+
+if not REQUESTED_FAULT_TYPES:
+    raise RuntimeError(
+        "No fault type is enabled. Set at least one of INCLUDE_3PHASE_FAULT, "
+        "INCLUDE_LG_FAULT, INCLUDE_LLG_FAULT, INCLUDE_LL_FAULT to True."
+    )
+
+if REPORT_OPTION != 0:
+    raise RuntimeError(
+        "REPORT_OPTION = {} is not supported. This script parses the fault "
+        "current summary table only (REPORT_OPTION = 0). Contribution and "
+        "total-fault-current report layouts use a different structure.".format(REPORT_OPTION)
+    )
+
 # ============================================================
 # PSS/E v34 / Python 2.7 setup
 # ============================================================
@@ -227,6 +271,27 @@ def find_sav_files(root_dir, allowed_levels):
     return savs
 
 
+def detect_report_fault_types(lines):
+    """
+    Determine which fault-type columns are actually present in this report,
+    by reading its header - independent of what was requested. PSS/E can
+    compute fewer fault types than requested if a case is missing negative
+    or zero-sequence data (the same reason LG/LLG/LL are grayed out in the
+    IEC 60909 Fault Calculation dialog when sequence data isn't available).
+    """
+    header_text = "\n".join(lines[:40])
+    detected = []
+    if "THREE PHASE FAULT" in header_text:
+        detected.append(("3PH", "3-Phase"))
+    if re.search(r'(?<!L)LG FAULT', header_text):
+        detected.append(("LG", "1-Phase (LG)"))
+    if "LLG FAULT" in header_text:
+        detected.append(("LLG", "LLG"))
+    if "LL FAULT" in header_text:
+        detected.append(("LL", "LL"))
+    return detected
+
+
 def filter_existing_buses(bus_list):
     """Return only buses that exist in the currently loaded case."""
     existing = []
@@ -281,8 +346,10 @@ def run_iec_sc_analysis(sav_path, report_path, log_path):
     return True
 
 
-def format_excel_sheet(ws, case_title):
-    """Apply header/title styling, borders, widths, and row heights."""
+def format_excel_sheet(ws, case_title, active_types):
+    """Apply header/title styling, borders, widths, and row heights.
+    active_types is the list of fault types actually detected in this
+    report (see detect_report_fault_types), not the requested settings."""
     title_font = Font(bold=True, color=TEXT_COLOR, size=16)
     header_font = Font(bold=True, color=TEXT_COLOR, size=14)
     data_font = Font(bold=False, color="000000", size=12)
@@ -299,30 +366,34 @@ def format_excel_sheet(ws, case_title):
 
     light_inside = Side(style="thin", color=HEADER_INSIDE_BORDER_COLOR)
 
+    max_col = 4 + len(active_types)
+    last_col_letter = get_column_letter(max_col)
+
     line1, line2 = psspy.titldt()
     ws['A1'] = "Short Circuit Fault Currents - " + line1.title()
-    ws.merge_cells('A1:F1')
+    ws.merge_cells('A1:{}1'.format(last_col_letter))
 
     ws['A2'] = "S. No."
     ws['B2'] = "Bus Number"
     ws['C2'] = "Bus Name"
     ws['D2'] = "Base kV"
-    ws['E2'] = "3-Phase"
-    ws['F2'] = "1-Phase"
-    ws['E3'] = "(kA)"
-    ws['F3'] = "(kA)"
+
+    for i, (_key, label) in enumerate(active_types):
+        col_letter = get_column_letter(5 + i)
+        ws['{}2'.format(col_letter)] = label
+        ws['{}3'.format(col_letter)] = "(kA)"
 
     ws.merge_cells('A2:A3')
     ws.merge_cells('B2:B3')
     ws.merge_cells('C2:C3')
     ws.merge_cells('D2:D3')
 
-    identifiers = ["", "(A)", "(B)", "(C)", "(D)", "(E)"]
+    identifiers = [""] + [chr(ord('A') + i) for i in range(max_col - 1)]
+    identifiers = ["" if s == "" else "({})".format(s) for s in identifiers]
     for i, char in enumerate(identifiers, 1):
         ws.cell(row=4, column=i).value = char
 
     max_row = ws.max_row
-    max_col = 6
 
     for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
         for cell in row:
@@ -362,7 +433,9 @@ def format_excel_sheet(ws, case_title):
                 bottom = Side(style='thin', color=BORDER_COLOR)
             cell.border = Border(left=left, right=right, top=top, bottom=bottom)
 
-    widths = {'A': 10, 'B': 17, 'C': 25, 'D': 15, 'E': 17, 'F': 17}
+    widths = {'A': 10, 'B': 17, 'C': 25, 'D': 15}
+    for i in range(len(active_types)):
+        widths[get_column_letter(5 + i)] = 17
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
@@ -372,10 +445,14 @@ def format_excel_sheet(ws, case_title):
     ws.freeze_panes = "A5"
 
 
-def add_metadata_footer(ws, case_title, data_end_row):
-    """Write tool name, version, author, GitHub, case, and timestamp below the table."""
+def add_metadata_footer(ws, case_title, data_end_row, max_col, warning=None):
+    """Write tool name, version, author, GitHub, case, and timestamp below
+    the table. If warning is set (e.g. a requested-vs-actual fault-type
+    mismatch), it's added as a highlighted row so it's visible even if the
+    console output wasn't watched during a batch run."""
     label_font = Font(bold=True, color="808080", size=9, italic=True)
     value_font = Font(bold=False, color="808080", size=9, italic=True)
+    warning_font = Font(bold=True, color="C00000", size=10, italic=True)
 
     start_row = data_end_row + 2  # one blank row gap after the table
 
@@ -395,6 +472,12 @@ def add_metadata_footer(ws, case_title, data_end_row):
         c_value.font = value_font
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=4)
 
+    if warning:
+        r = start_row + len(footer_rows) + 1  # one blank row gap
+        c = ws.cell(row=r, column=1, value="WARNING: " + warning)
+        c.font = warning_font
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=max_col)
+
 
 def parse_sc_report_to_excel(report_path, excel_path, case_title):
     print("Formatting Excel: {}".format(excel_path))
@@ -405,16 +488,35 @@ def parse_sc_report_to_excel(report_path, excel_path, case_title):
     with open(report_path, 'r') as f:
         lines = f.readlines()
 
-    pattern = re.compile(
-        r"^\s*(\d+)\s+"      # Bus Number
-        r"\[(.*?)\]\s+"      # Name and kV
-        r"(\w+)\s+"          # Unit
-        r"([-\d\.]+)\s+"     # 3Ph I
-        r"([-\d\.]+)\s+"     # 3Ph Ang
-        r"([-\d\.]+)\s+"     # LG I
-        r"([-\d\.]+)\s+"     # LG Ang
-        r"([-\d\.]+)"        # Voltage factor
-    )
+    active_types = detect_report_fault_types(lines)
+    if not active_types:
+        print("  - WARNING: could not detect any fault-type columns in the "
+              "report header for {}. Skipping.".format(case_title))
+        return
+
+    requested_keys = [k for k, _ in REQUESTED_FAULT_TYPES]
+    actual_keys = [k for k, _ in active_types]
+    missing_keys = [k for k in requested_keys if k not in actual_keys]
+
+    seq_warning = None
+    if missing_keys:
+        seq_warning = (
+            "Requested {} but report only contains {} - likely missing "
+            "negative/zero-sequence data for this case.".format(
+                ", ".join(requested_keys), ", ".join(actual_keys))
+        )
+        print("  - WARNING: {}".format(seq_warning))
+
+    # Prefix: bus number, [name+kV], unit. Then one (magnitude, angle) pair
+    # per fault type actually present in this report, then voltage factor.
+    pattern_parts = [
+        r"^\s*(\d+)\s+",      # Bus Number
+        r"\[(.*?)\]\s+",      # Name and kV
+        r"(\w+)\s+",          # Unit
+    ]
+    pattern_parts += [r"([-\d\.]+)\s+([-\d\.]+)\s+"] * len(active_types)
+    pattern_parts.append(r"([-\d\.]+)")  # Voltage factor
+    pattern = re.compile("".join(pattern_parts))
 
     data_rows = []
     for line in lines:
@@ -444,13 +546,12 @@ def parse_sc_report_to_excel(report_path, excel_path, case_title):
             print("  - WARNING: could not parse kV for bus {} from '{}'; "
                   "check BUS_NAME_FIELD_WIDTH.".format(bus_num, name_kv_raw))
 
-        i_3ph_ka = float(match.group(4)) / 1000.0
-        i_lg_ka = float(match.group(6)) / 1000.0
+        row_data = {'num': bus_num, 'name': bus_name, 'kv': base_kv_val}
+        for i, (key, _label) in enumerate(active_types):
+            mag_group = 4 + i * 2  # magnitude group index for this fault type
+            row_data[key] = float(match.group(mag_group)) / 1000.0
 
-        data_rows.append({
-            'num': bus_num, 'name': bus_name, 'kv': base_kv_val,
-            '3ph': i_3ph_ka, '1ph': i_lg_ka
-        })
+        data_rows.append(row_data)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -463,19 +564,18 @@ def parse_sc_report_to_excel(report_path, excel_path, case_title):
         ws.cell(row=current_row, column=3, value=row_data['name'])
         ws.cell(row=current_row, column=4, value=row_data['kv'])
 
-        c_3ph = ws.cell(row=current_row, column=5, value=row_data['3ph'])
-        if row_data['3ph'] > 0 and round(row_data['3ph'], 2) != 0:
-            c_3ph.number_format = '0.00'
-
-        c_1ph = ws.cell(row=current_row, column=6, value=row_data['1ph'])
-        if row_data['1ph'] > 0 and round(row_data['1ph'], 2) != 0:
-            c_1ph.number_format = '0.00'
+        for i, (key, _label) in enumerate(active_types):
+            col = 5 + i
+            val = row_data[key]
+            c = ws.cell(row=current_row, column=col, value=val)
+            if val > 0 and round(val, 2) != 0:
+                c.number_format = '0.00'
 
         current_row += 1
 
     last_data_row = current_row - 1
-    format_excel_sheet(ws, case_title)
-    add_metadata_footer(ws, case_title, last_data_row)
+    format_excel_sheet(ws, case_title, active_types)
+    add_metadata_footer(ws, case_title, last_data_row, 4 + len(active_types), seq_warning)
 
     # --- Safe save: auto-close the target file if it's open in Excel ---
     try:

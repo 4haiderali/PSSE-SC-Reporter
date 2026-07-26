@@ -111,6 +111,7 @@ Each `.sav` case produces one Excel file containing:
 - Not yet tested on other PSS/E versions.
 - Assumes IEC 60909 is the desired fault standard; ANSI/other standards are not covered by this script.
 - The script does not modify the PSS/E case. It only reads data and writes an Excel report.
+- LG/LLG/LL faults require negative and/or zero-sequence data in the case. If that data isn't available, PSS/E computes fewer fault types than requested; the tool detects this per case and flags it in the Excel output and console rather than failing silently.
 
 ---
 
@@ -144,4 +145,4 @@ LinkedIn: [linkedin.com/in/4haiderali](https://linkedin.com/in/4haiderali)
 
 ## Version
 
-Current release: `1.0.1`
+Current release: `1.0.3`
